@@ -1,0 +1,259 @@
+<!DOCTYPE HTML>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>入室管理システム</title>
+    <style>
+#ble-status {
+  background-color: #FFF;
+  color: #000;
+  font-size: 1.2rem;
+  padding: 0.5rem;
+}
+button {
+  padding: 0.25rem;
+  font-size: 1.0rem;
+  cursor: pointer;
+}
+#video {
+  border: 1px solid #CCC;
+  width:320px;
+  height:240px;
+}
+#photo {
+  border: 1px solid #CCC;
+  width:320px;
+  height:240px;
+}
+#canvas {
+  display:none;
+}
+.camera {
+  width: 340px;
+  display:inline-block;
+}
+.output {
+  width: 340px;
+  display:inline-block;
+}
+    </style>
+  </head>
+  <body data-role="page">
+    <div id="connect">
+      <h1>
+        micro:bitとBluetooth接続
+      </h1>
+      <div><input id="ble-status" value="未接続" disabled="true"></div>
+      <div>
+        <button type="button" id="ble-connect-button">CONNECT</button>
+        <button type="button" id="ble-disconnect-button">DISCONNECT</button>
+      </div>
+    </div>
+    <div>
+      <h1>
+        カメラのモニタリング
+      </h1>
+      <div class="camera">
+        <video id="video" autoplay playsinline >Video stream not available.</video>
+        <div>ライブ映像</div>
+      </div>
+      <canvas id="canvas">
+      </canvas>
+      <div class="output">
+        <img id="photo" alt="The screen capture will appear in this box.">
+        <div>最後に撮影された写真</div>
+      </div>
+      <p>
+        Visit our article <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Taking_still_photos"> Taking still photos with WebRTC</a> to learn more about the technologies used here.
+      </p>
+      <button id="startbutton">Take photo</button>
+    </div>
+    <script>
+(function() {
+  // micro:bit Bluetooth UARTサービスUUID
+  var UART_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  var UART_SERVICE_CHARACTERISTICS_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+
+  // 写真の横幅 (表示幅は320px、640だと表示されている大きさの倍の解像度になります)
+  var width = 640;
+  // 横幅、0のままであれば width の 3/4 の高さが使用されます
+  var height = 0;
+
+  // micro:bitとのBLE接続を格納する変数
+  var microbit_ble_device;
+
+  // カメラからのストリーミング画像が video タグに流れているかどうかのフラグ
+  var streaming = false;
+
+  // HTML要素を格納する変数
+  var ble_status = null;
+  var video = null;
+  var canvas = null;
+  var photo = null;
+
+  // 初期化処理
+  function startup() {
+    ble_status = document.getElementById("ble-status");
+    document.getElementById("ble-connect-button").addEventListener("click", connect, false);
+    document.getElementById("ble-disconnect-button").addEventListener("click", disconnect, false);
+
+    video = document.getElementById('video');
+    canvas = document.getElementById('canvas');
+    photo = document.getElementById('photo');
+
+    // Webカメラへのアクセス許可を求めて、videoタグのsrcにセット
+    navigator.getUserMedia(
+      {
+        video: true,
+        audio: false
+      },
+      function(stream) {
+        video.src = window.URL.createObjectURL(stream);
+        video.play();
+      },
+      function(err) {
+        console.log("An error occured! " + err);
+      }
+    );
+
+    // videoタグの再生準備が整ったら実行する処理
+    video.addEventListener('canplay', function(ev){
+      if (!streaming) {
+        height = video.videoHeight / (video.videoWidth/width);
+
+        if (isNaN(height)) {
+          height = width / (4/3);
+        }
+        video.setAttribute('width', width);
+        video.setAttribute('height', height);
+        canvas.setAttribute('width', width);
+        canvas.setAttribute('height', height);
+        streaming = true;
+      }
+    }, false);
+
+    clearphoto();
+
+    // TODO:あとで消す
+    document.getElementById('startbutton').addEventListener('click', function(ev){
+      takepicture();
+      ev.preventDefault();
+    }, false);
+  }
+
+  // micro:bitにBLE接続
+  function connect(){
+    navigator.bluetooth.requestDevice({
+      filters: [{
+        namePrefix: 'BBC micro:bit',
+      }],
+      optionalServices: [UART_SERVICE_UUID]
+    })
+    .then(device => {
+      ble_status.value='試行中';
+      microbit_ble_device=device;
+      return device.gatt.connect();
+    })
+    .then(server => {
+      return server.getPrimaryService(UART_SERVICE_UUID);
+    })
+    .then(service => {
+      return service.getCharacteristic(UART_SERVICE_CHARACTERISTICS_UUID);
+    })
+    .then(chara => {
+      ble_status.value='接続中';
+      characteristic=chara;
+      characteristic.startNotifications();
+      characteristic.addEventListener('characteristicvaluechanged',onCharacteristicValueChanged);
+    })
+    .catch(error => {
+      console.log(error);
+      alert("BLE 接続に失敗しました。");
+    });
+  }
+
+  // UARTメッセージを受けて、'1'だったら写真を撮る
+  function onCharacteristicValueChanged(evt) {
+    var str_arr=[];
+    for(var i=0;i<evt.target.value.byteLength;i++){
+        str_arr[i]=evt.target.value.getUint8(i);
+    }
+    var str=String.fromCharCode.apply(null,str_arr);
+    console.log("Recieved message:"+str);
+    if (str === '1') {
+      takepicture();
+    }
+  }
+
+  // micro:bitとのBLE接続を切断
+  function disconnect() {
+    if (!microbit_ble_device || !microbit_ble_device.gatt.connected) return ;
+    microbit_ble_device.gatt.disconnect();
+    ble_status.value='切断中'
+  }
+
+  // 写真を表示する img タグにグレーの背景を表示
+  function clearphoto() {
+    var context = canvas.getContext('2d');
+    context.fillStyle = "#AAA";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    var data = canvas.toDataURL('image/png');
+    photo.setAttribute('src', data);
+  }
+
+  // 現在の video タグに表示されている映像を写真として切り出して img タグに描画
+  function takepicture() {
+    var context = canvas.getContext('2d');
+    if (width && height) {
+      canvas.width = width;
+      canvas.height = height;
+      context.drawImage(video, 0, 0, width, height);
+
+      var data = canvas.toDataURL('image/png');
+      photo.setAttribute('src', data);
+
+      postPicture(data);
+    } else {
+      clearphoto();
+    }
+  }
+
+  // 撮った写真をサーバーに送信
+  function postPicture(data) {
+    var bin = atob(data.replace(/^.*,/,''));
+    var buffer = new Uint8Array(bin.length);
+    for (var i=0;i<bin.length;i++) {
+      buffer[i] = bin.charCodeAt(i);
+    }
+    var bytesArray = buffer;
+    fetch("./faces", {
+      method: 'POST',
+      headers: {'Content-Type': 'application/octet-stream'},
+      body: bytesArray
+    })
+    .then((res) => res.json())
+    .then((json) => {
+      console.log(json);
+      if (json.err) throw json.err;
+
+      // 検出できたら矩形を顔に表示
+      var face = json;
+      var context = canvas.getContext('2d');
+      var rect = face.faceRectangle;
+      context.rect(rect.left, rect.top, rect.width, rect.height);
+      context.lineWidth='3';
+      context.strokeStyle='red';
+      context.stroke();
+      var data = canvas.toDataURL('image/png');
+      photo.setAttribute('src', data);
+    })
+    .catch(console.error);
+  }
+
+  // ページがロードされたら 初期化関数 startup を呼ぶ
+  window.addEventListener('load', startup, false);
+})();
+    </script>
+  </body>
+</html>
